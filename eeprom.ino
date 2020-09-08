@@ -1,22 +1,41 @@
+//
+// Ed's 93c56 / 93c66 PROM programmer
+//
+// prom is in 16 bit mode only
+// In maxon radio, ORG pin is hardwired to make chip operate in 16 bit mode
+//
+// Programmer can:-
+//   read prom into memory
+//   write buffer into prom
+//   erase entire device
+//   load intel hex file into memory with or without offset
+//   dump buffer contents
+//   
+
 // Maximum number of bytes in data buffer
+// Biggest PROM ever - 1K when using an Arduino Uno
 #define BUFF_SIZE 1024
 
 // Length of serial port buffer
 #define SERBUFF_LEN 80
 
-//defining pins for eeprom   
-#define DATA_IN  2    // EEPROM PIN#4
-#define DATA_OUT 3    // EEPROM PIN#3
-#define CLOCK 4       // EEPROM PIN#2
-#define CHIP_SEL 5    // EEPROM PIN#1
+// Value to initialise data buffer with
+#define INIT_BUFF  0x00
 
-#define READ   0b1100          //read instruction
-#define WRITE  0b1010          //write instruction
-#define EWEN   0b10011         //erase write enable instruction
+//defining GPIO pins for eeprom   
+#define DATA_IN  2              // EEPROM PIN#4 - DO
+#define DATA_OUT 3              // EEPROM PIN#3 - DI
+#define CLOCK 4                 // EEPROM PIN#2 - CLK
+#define CHIP_SEL 5              // EEPROM PIN#1 - CS
 
-char serialBuff[SERBUFF_LEN];
-
-char *paramPtr;
+#define READ   0b00000110       //read instruction
+#define WRITE  0b00000101       //write instruction
+#define WREN   0b00000100       //erase write enable instruction
+#define WREN2  0b11000000       // second byte of write enable
+#define WRDS   0b00000100       // write disable
+#define WRDS2  0b00000000       // second byte of write disable
+#define ERAL   0b00000100       // erase all
+#define ERAL2  0b10000000       // second byte of erase
 
 typedef struct
 {
@@ -32,6 +51,9 @@ void cmdSetPromSize(void);
 void cmdFillBuff(void);
 void cmdDumpBuff(void);
 void cmdListCommands(void);
+void cmdNFill(void);
+void cmdErase(void);
+void cmdIntelDump(void);
 
 // Address offset for loading data
 long int offset;
@@ -39,14 +61,20 @@ long int offset;
 // size of PROM
 int promSize;
 
+char serialBuff[SERBUFF_LEN];
+char *paramPtr;
+
 unsigned char dataBuffer[BUFF_SIZE];
 
 cmdType cmdList[] =
 {
     { "dump", cmdDumpBuff },
+    { "erase", cmdErase },
     { "fill", cmdFillBuff },
     { "help", cmdListCommands },
+    { "idump", cmdIntelDump },
     { "load", cmdLoadMemory },
+    { "nfill", cmdNFill },
     { "offset", cmdSetOffset },
     { "prog", cmdProgDevice },
     { "read", cmdReadDevice },
@@ -54,6 +82,69 @@ cmdType cmdList[] =
     { "?", cmdListCommands },
     { "", NULL }
 };
+
+void writeEnable()
+{
+    digitalWrite(CHIP_SEL ,HIGH);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, WREN);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, WREN2);
+
+    digitalWrite(CHIP_SEL, LOW);
+
+    delay(2);
+}
+
+void writeDisable()
+{
+    digitalWrite(CHIP_SEL ,HIGH);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, WRDS);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, WRDS2);
+
+    digitalWrite(CHIP_SEL, LOW);
+
+    delay(2);
+}
+
+void eraseDevice()
+{
+    digitalWrite(CHIP_SEL ,HIGH);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, ERAL);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, ERAL2);
+
+    digitalWrite(CHIP_SEL, LOW);
+
+    // datasheet says max time is 15ms
+    delay(20);
+}
+
+void readWord(int addr, unsigned char *hi, unsigned char *lo)
+{
+    digitalWrite(CHIP_SEL ,HIGH);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, READ);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, addr);
+
+    // Read 16 bits of data, eight at a time
+    *hi = shiftIn(DATA_IN, CLOCK, MSBFIRST);        
+    *lo = shiftIn(DATA_IN, CLOCK, MSBFIRST);
+   
+    digitalWrite(CHIP_SEL, LOW);
+}
+
+void writeWord(int addr, unsigned char hi, unsigned char lo)
+{
+    digitalWrite(CHIP_SEL ,HIGH);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, WRITE);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, addr);
+
+    // Write 16 bits of data, eight at a time
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, hi);
+    shiftOut(DATA_OUT, CLOCK, MSBFIRST, lo);
+   
+    digitalWrite(CHIP_SEL, LOW);
+
+    // datasheet says max time is 1ms per byte
+    delay(5);
+}
 
 unsigned char buffToByte(char *buff)
 {           
@@ -76,6 +167,8 @@ unsigned char buffToWord(char *buff)
 }
 
 // Read a line from serial port up to '\n' character
+// seperate command and parameter into two strings by replacing space with '\0'
+// set paramPtr to point to parameter if present
 void serialReadline()
 {
     int c;
@@ -130,28 +223,110 @@ void cmdListCommands()
     }
 }
 
+void cmdErase()
+{
+    writeEnable();
+    eraseDevice();
+    writeDisable();
+}
+
+void cmdNFill()
+{
+    int addr;
+    unsigned char dByte;
+
+    dByte = 0;
+    for(addr = 0; addr < promSize; addr++)
+    {
+        dataBuffer[addr] = dByte;
+        dByte++;
+    }
+}
+
 void cmdDumpBuff()
 {
     int addr;
     int c;
-    char txtBuff[16];
+    char txtBuff[32];
+    unsigned char dByte;
 
     addr = 0;
     do
     {
-        sprintf(txtBuff, "%04x   ", addr);
+        sprintf(txtBuff, "%04X   ", addr);
         Serial.print(txtBuff);
 
         for(c = 0; c < 16; c++)
         {
-            sprintf(txtBuff, "%02x ", dataBuffer[addr + c]);
+            sprintf(txtBuff, "%02X ", dataBuffer[addr + c]);
             Serial.print(txtBuff);
         }
+
+        txtBuff[0] = ':';
+        c = 0;
+        do
+        {
+            dByte = dataBuffer[addr + c];
+            c++;
+            
+            if(isprint(dByte))
+            {
+                txtBuff[c] = dByte;
+            }
+            else
+            {
+                txtBuff[c] = '.';
+            }
+        }
+        while(c < 16);
+        txtBuff[17] = ':';
+        txtBuff[18] = '\0';
+
+        Serial.print("   ");
+        Serial.print(txtBuff);
         Serial.print("\n");
 
         addr = addr + 16;
     }
     while(addr < promSize);
+}
+
+void cmdIntelDump()
+{
+    int addr;
+    int c;
+    unsigned char cs;
+    unsigned char hi;
+    unsigned char lo;
+    unsigned char dByte;
+    char txtBuff[16];
+
+    addr = 0;
+    do
+    {
+        hi = (addr & 0xff00) >> 8;
+        lo = addr & 0x00ff;
+        
+        sprintf(serialBuff, ":10%02X%02X00", hi, lo);
+        cs = 0 - 16 - hi - lo;
+        for(c = 0; c < 16; c++)
+        {
+            dByte = dataBuffer[addr + c];
+            sprintf(txtBuff, "%02X", dByte);
+            strcat(serialBuff, txtBuff);
+
+            cs = cs - dByte;
+        }
+        sprintf(txtBuff, "%02X\n", cs);
+        strcat(serialBuff, txtBuff);
+        
+        addr = addr + 16;
+
+        Serial.print(serialBuff);
+    }
+    while(addr < promSize);
+
+    Serial.print(":00000001FF\n");
 }
 
 void cmdFillBuff()
@@ -178,18 +353,8 @@ void cmdReadDevice()
     addr = 0;
     do
     {
-        digitalWrite(CHIP_SEL ,HIGH);
-        shiftOut(DATA_OUT, CLOCK, MSBFIRST, READ);
-        shiftOut(DATA_OUT, CLOCK, MSBFIRST, addr);
-
-        // Read 16 bits of data, eight at a time
-        dataBuffer[addr] = shiftIn(DATA_IN, CLOCK, MSBFIRST);
-        addr++;
-        
-        dataBuffer[addr] = shiftIn(DATA_IN, CLOCK, MSBFIRST);
-        addr++;
-   
-        digitalWrite(CHIP_SEL, LOW);
+        readWord(addr, &dataBuffer[addr], &dataBuffer[addr + 1]);
+        addr = addr + 2;
     }
     while(addr < promSize);
 }
@@ -199,16 +364,25 @@ void cmdSetPromSize()
 {
     char txtbuff[16];
     char *endPtr;
+    int sz;
     
     if(paramPtr == NULL)
     {
-        sprintf(txtbuff, "0x%04x\n", promSize);
+        sprintf(txtbuff, "0x%04X\n", promSize);
         Serial.print("Prom size: ");
         Serial.print(txtbuff);
     }
     else
     {
-        promSize = strtol(paramPtr, &endPtr, 16);
+        sz = strtol(paramPtr, &endPtr, 16);
+        if(sz > BUFF_SIZE)
+        {
+            Serial.print("Size too big\n");
+        }
+        else
+        {
+            promSize = sz;    
+        }
     }
 }
 
@@ -220,7 +394,7 @@ void cmdSetOffset()
     
     if(paramPtr == NULL)
     {
-        sprintf(txtbuff, "0x%04x\n", offset);
+        sprintf(txtbuff, "0x%04X\n", offset);
         Serial.print("Load offset: ");
         Serial.print(txtbuff);
     }
@@ -246,13 +420,15 @@ void cmdLoadMemory()
 
     do
     {
+        serialReadline();
+        
         // must start with ':'
         //                   01234567890"
         // must be at least ":LLAAAARRCC"
         if(serialBuff[0] == ':' && strlen(serialBuff) >= 11)
         {
             recordType = buffToByte(&serialBuff[7]);
-
+            
             switch(recordType)
             {
                 // Data record
@@ -260,6 +436,10 @@ void cmdLoadMemory()
                     byteCount = buffToByte(&serialBuff[1]);
 
                     addr = buffToWord(&serialBuff[3]) + offset;
+                    if(addr > BUFF_SIZE)
+                    {
+                        addr = 0;
+                    }
 
                     // data starts at ninth character
                     c = 9;   
@@ -298,7 +478,19 @@ void cmdLoadMemory()
 // Programme device with buffer data
 void cmdProgDevice()
 {
-    Serial.print("Programme device\n");
+    int addr;
+
+    writeEnable();
+
+    addr = 0;
+    do
+    {
+        writeWord(addr, dataBuffer[addr], dataBuffer[addr + 1]);
+        addr = addr + 2;
+    }
+    while(addr < promSize);
+
+    writeDisable();
 }
 
 void setup()
@@ -312,12 +504,12 @@ void setup()
     Serial.begin(9600);
 
     offset = 0;
-    promSize = 256;
-    memset(dataBuffer, 0xff, BUFF_SIZE);
+    promSize = 256;   // A 93C56
+    memset(dataBuffer, INIT_BUFF, BUFF_SIZE);
 
     while(!Serial);
 
-    Serial.print("Ed's PROM programmer\n");
+    Serial.print("Ed's 93cX6 PROM programmer\n");
 }
 
 void loop()
@@ -329,7 +521,7 @@ void loop()
         Serial.print("> ");
         serialReadline();
         Serial.print("\n");
-        
+
         cmd = 0;
         while(strcmp(cmdList[cmd].name, serialBuff) && cmdList[cmd].name[0] != '\0')
         {
