@@ -31,11 +31,12 @@
 #define INIT_BUFF  0x00
 
 //defining GPIO pins for eeprom   
-#define DATA_IN  2              // EEPROM PIN#4 - DO
-#define DATA_OUT 3              // EEPROM PIN#3 - DI
-#define CLOCK    4              // EEPROM PIN#2 - CLK
-#define CHIP_SEL 5              // EEPROM PIN#1 - CS
-#define PWR      6              // Turn PROM on and off
+#define DATA_IN  2              // EEPROM PIN#4 - DO - PTT - maxon mic pin 5 
+#define DATA_OUT 3              // EEPROM PIN#3 - DI - MIC - maxon mic pin 4
+#define CLOCK    4              // EEPROM PIN#2 - CLK - HANGER - maxon mic pin 3
+#define CHIP_SEL 5              // EEPROM PIN#1 - CS - maxon mic pin 2
+#define PWR      6              // Turn PROM on and off - not used for Maxon radio programming
+                                // GND is pin 1 on maxon mic connector
 
 #define READ   0b00000110       //read instruction
 #define WRITE  0b00000101       //write instruction
@@ -101,9 +102,9 @@ int pageLen;
 
 promType proms[] =
 {
-    { "9346", 6, 128 },
-    { "9356", 8, 256 },
-    { "9366", 8, 512 },
+    { "9346", 6,  128 },
+    { "9356", 8,  256 },
+    { "9366", 8,  512 },
     { "9376", 10, 1024 },
 #ifdef __BIG_PROM
     { "9386", 10, 2048 },
@@ -115,34 +116,40 @@ promType proms[] =
 cmdType cmdList[] =
 {
     { "device", cmdSetPromType },
-    { "dump", cmdDumpBuff },
-    { "erase", cmdErase },
-    { "fill", cmdFillBuff },
-    { "help", cmdListCommands },
-    { "idump", cmdIntelDump },
-    { "load", cmdLoadMemory },
-    { "nfill", cmdNFill },
+    { "dump",   cmdDumpBuff },
+    { "erase",  cmdErase },
+    { "fill",   cmdFillBuff },
+    { "help",   cmdListCommands },
+    { "idump",  cmdIntelDump },
+    { "load",   cmdLoadMemory },
+    { "nfill",  cmdNFill },
     { "offset", cmdSetOffset },
     { "pagelen", cmdSetPageLen },
-    { "prog", cmdProgDevice },
-    { "read", cmdReadDevice },
-    { "?", cmdListCommands },
-    { NULL, NULL }
+    { "prog",   cmdProgDevice },
+    { "read",   cmdReadDevice },
+    { "?",      cmdListCommands },
+    { NULL,     NULL }
 };
 
+// turn prom on - probably a relay or something...
 void powerUp()
 {
+    digitalWrite(LED_BUILTIN, HIGH);
     digitalWrite(PWR, HIGH);
     delay(500);
 }
 
+// turn prom off
 void powerDown()
 {
+    digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(PWR, LOW);
 }
 
 // Shift a number of bits out of DATA_OUT pin using CLOCK pin
 // Data goes out most significant bit first
+// If bitlength == 0, don't clock anything out until first "1" is found in data
+// otherwise, clock "bitlenght" bits out
 void shiftBitsOut(unsigned short int value, int bitLength)
 {
     if(bitLength == 0)
@@ -174,6 +181,7 @@ void shiftBitsOut(unsigned short int value, int bitLength)
     }
 }
 
+// Must be done before writing or erasing prom
 void writeEnable()
 {
     unsigned short int opCode;
@@ -212,6 +220,7 @@ void writeDisable()
     delay(2);
 }
 
+// Erase entire device
 void eraseDevice()
 {
     unsigned short int opCode;
@@ -232,54 +241,19 @@ void eraseDevice()
     delay(20);
 }
 
-void readWord(unsigned short int addr, unsigned char *hi, unsigned char *lo)
-{
-    unsigned short int opCode;
-
-    opCode = (READ << proms[promId].addrLen) | addr;
-    
-    digitalWrite(CHIP_SEL ,HIGH);
-
-    shiftBitsOut(opCode, proms[promId].addrLen + 3);
-
-    // Read 16 bits of data, eight at a time
-    *hi = shiftIn(DATA_IN, CLOCK, MSBFIRST);        
-    *lo = shiftIn(DATA_IN, CLOCK, MSBFIRST);
-   
-    digitalWrite(CHIP_SEL, LOW);
-}
-
-void writeWord(unsigned short int addr, unsigned char hi, unsigned char lo)
-{
-    unsigned short int opCode;
-
-    opCode = (WRITE << proms[promId].addrLen) | addr;
-    
-    digitalWrite(CHIP_SEL ,HIGH);
-
-    shiftBitsOut(opCode, proms[promId].addrLen + 3);
-
-    // Write 16 bits of data, eight at a time
-    opCode = (hi << 8) | lo;
-    shiftBitsOut(opCode, 16);
-
-    digitalWrite(CHIP_SEL, LOW);
-
-    // datasheet says max time is 1ms per byte
-    delay(5);
-}
-
+// Read entire device into data buffer
 void readDevice()
 {
     unsigned short int opCode;
     int addr;
+    char txtBuff[16];
 
     // Start at device address 0
     opCode = (READ << proms[promId].addrLen) | 0;
-    
+
     digitalWrite(CHIP_SEL ,HIGH);
 
-    shiftBitsOut(opCode, proms[promId].addrLen + 3);
+    shiftBitsOut(opCode, 0);
 
     // Read entire device
     addr = 0;
@@ -295,6 +269,7 @@ void readDevice()
     digitalWrite(CHIP_SEL, LOW);
 }
 
+// Write data buffer into prom
 void writeDevice()
 {
     unsigned short int opCode;
@@ -302,14 +277,15 @@ void writeDevice()
     int buffAddr;
 
     devAddr = 0;
-    opCode = (WRITE << proms[promId].addrLen) | devAddr;
 
     buffAddr = 0;
     while(buffAddr < proms[promId].promSize)
     {
+        opCode = (WRITE << proms[promId].addrLen) | devAddr;
+
         digitalWrite(CHIP_SEL ,HIGH);
 
-        shiftBitsOut(opCode, proms[promId].addrLen + 3);
+        shiftBitsOut(opCode, 0);
         shiftOut(DATA_OUT, CLOCK, MSBFIRST, dataBuffer[buffAddr]);
         buffAddr++;
         
@@ -392,6 +368,7 @@ void serialReadline()
     while(c < SERBUFF_LEN && inchar != '\n');
 }
 
+// List all available commands
 void cmdListCommands()
 {
     int c;
@@ -406,6 +383,7 @@ void cmdListCommands()
     }
 }
 
+// Erase device
 void cmdErase()
 {
     powerUp();
@@ -415,6 +393,26 @@ void cmdErase()
     powerDown();
 }
 
+// Read device contents into data buffer
+void cmdReadDevice()
+{
+    powerUp();
+    readDevice();
+    powerDown();
+}
+
+// Programme device with buffer data
+void cmdProgDevice()
+{
+    powerUp();
+    writeEnable();
+    writeDevice();
+    writeDisable();
+    powerDown();
+}
+
+
+// fill data buffer with numbers starting at 0 up to 255 and repeating until buffer is full
 void cmdNFill()
 {
     unsigned short int addr;
@@ -428,6 +426,24 @@ void cmdNFill()
     }
 }
 
+// Fill data buffer with a specified value
+void cmdFillBuff()
+{
+    unsigned char fillByte;
+    char *endPtr;
+
+    if(paramPtr == NULL)
+    {
+        Serial.print("Missing parameter\n");
+    }
+    else
+    {
+        fillByte = (unsigned char)strtol(paramPtr, &endPtr, 16);
+        memset(dataBuffer, fillByte, BUFF_SIZE);
+    }
+}
+
+// dump data buffer in readable form
 void cmdDumpBuff()
 {
     unsigned short int addr;
@@ -503,6 +519,7 @@ void cmdDumpBuff()
     while(addr < proms[promId].promSize);
 }
 
+// Dump data buffer in Intel hex format
 void cmdIntelDump()
 {
     unsigned short int addr;
@@ -542,120 +559,7 @@ void cmdIntelDump()
     Serial.print(":00000001FF\n");
 }
 
-void cmdFillBuff()
-{
-    unsigned char fillByte;
-    char *endPtr;
-
-    if(paramPtr == NULL)
-    {
-        Serial.print("Missing parameter\n");
-    }
-    else
-    {
-        fillByte = (unsigned char)strtol(paramPtr, &endPtr, 16);
-        memset(dataBuffer, fillByte, BUFF_SIZE);
-    }
-}
-
-// Read device contents and send in hex to serial port
-void cmdReadDevice()
-{
-    powerUp();
-    readDevice();
-    powerDown();
-}
-
-// Set prom type
-void cmdSetPromType()
-{
-    char txtBuff[16];
-    int c;
-    
-    if(paramPtr == NULL)
-    {
-        Serial.print("Device: ");
-        Serial.print(proms[promId].promName);
-        Serial.print("\n");
-
-        sprintf(txtBuff, "Size: %d KB\n", proms[promId].promSize);
-        Serial.print(txtBuff);
-
-        Serial.print("Supported devices: ");
-        c = 0;
-        do
-        {
-            Serial.print(proms[c].promName);
-            c++;
-            if(proms[c].promName != NULL)
-            {
-                Serial.print(", ");
-            }
-        }
-        while(proms[c].promName != NULL);
-        Serial.print("\n");
-
-        Serial.print("Buffer: ");
-
-        sprintf(txtBuff, "%d bytes\n", BUFF_SIZE);
-        Serial.print(txtBuff);
-    }
-    else
-    {
-        c = 0;
-        while(strcmp(paramPtr, proms[c].promName) && proms[c].promName != NULL)
-        {
-            c++;
-        }
-
-        if(proms[c].promName == NULL)
-        {
-            Serial.print("Invalid device\n");
-        }
-        else
-        {
-            promId = c;
-        }
-    }
-}
-
-// Set load offset
-void cmdSetOffset()
-{
-    char txtbuff[16];
-    char *endPtr;
-    
-    if(paramPtr == NULL)
-    {
-        sprintf(txtbuff, "0x%04X\n", offset);
-        Serial.print("Load offset: ");
-        Serial.print(txtbuff);
-    }
-    else
-    {
-        offset = strtol(paramPtr, &endPtr, 16);
-    }
-}
-
-// Set load offset
-void cmdSetPageLen()
-{
-    char txtbuff[16];
-    char *endPtr;
-    
-    if(paramPtr == NULL)
-    {
-        sprintf(txtbuff, "%d\n", pageLen);
-        Serial.print("Page length: ");
-        Serial.print(txtbuff);
-    }
-    else
-    {
-        pageLen = strtol(paramPtr, &endPtr, 10);
-    }
-}
-
-// Read serial port data and store in buffer
+// Load data buffer with Intel hex file from serial port
 // add offset to addresses in hex file
 void cmdLoadMemory()
 {
@@ -742,18 +646,99 @@ void cmdLoadMemory()
     while(eof == false);
 }
 
-// Programme device with buffer data
-void cmdProgDevice()
+// Set prom type
+// decides data buffer size and number of bits in prom addresses
+void cmdSetPromType()
 {
-    powerUp();
-    writeEnable();
-    writeDevice();
-    writeDisable();
-    powerDown();
+    char txtBuff[16];
+    int c;
+    
+    if(paramPtr == NULL)
+    {
+        Serial.print("Device: ");
+        Serial.print(proms[promId].promName);
+        Serial.print("\n");
+
+        sprintf(txtBuff, "Size: %d KB\n", proms[promId].promSize);
+        Serial.print(txtBuff);
+
+        Serial.print("Supported devices: ");
+        c = 0;
+        do
+        {
+            Serial.print(proms[c].promName);
+            c++;
+            if(proms[c].promName != NULL)
+            {
+                Serial.print(", ");
+            }
+        }
+        while(proms[c].promName != NULL);
+        Serial.print("\n");
+
+        Serial.print("Buffer: ");
+
+        sprintf(txtBuff, "%d bytes\n", BUFF_SIZE);
+        Serial.print(txtBuff);
+    }
+    else
+    {
+        c = 0;
+        while(strcmp(paramPtr, proms[c].promName) && proms[c].promName != NULL)
+        {
+            c++;
+        }
+
+        if(proms[c].promName == NULL)
+        {
+            Serial.print("Invalid device\n");
+        }
+        else
+        {
+            promId = c;
+        }
+    }
+}
+
+// Set load offset to be applied to Intel hex loading
+void cmdSetOffset()
+{
+    char txtbuff[16];
+    char *endPtr;
+    
+    if(paramPtr == NULL)
+    {
+        sprintf(txtbuff, "0x%04X\n", offset);
+        Serial.print("Load offset: ");
+        Serial.print(txtbuff);
+    }
+    else
+    {
+        offset = strtol(paramPtr, &endPtr, 16);
+    }
+}
+
+// Set page length for "dump" command
+void cmdSetPageLen()
+{
+    char txtbuff[16];
+    char *endPtr;
+    
+    if(paramPtr == NULL)
+    {
+        sprintf(txtbuff, "%d\n", pageLen);
+        Serial.print("Page length: ");
+        Serial.print(txtbuff);
+    }
+    else
+    {
+        pageLen = strtol(paramPtr, &endPtr, 10);
+    }
 }
 
 void setup()
 {
+    pinMode(LED_BUILTIN, OUTPUT);
     pinMode(CLOCK, OUTPUT);
     pinMode(DATA_OUT, OUTPUT);
     pinMode(DATA_IN, INPUT);
@@ -762,7 +747,7 @@ void setup()
 
     digitalWrite(CHIP_SEL, LOW);
     digitalWrite(CLOCK, LOW);
-    digitalWrite(PWR, LOW);
+    powerDown();
     
     Serial.begin(9600);
 
